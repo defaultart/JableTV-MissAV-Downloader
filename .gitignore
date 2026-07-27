@@ -9,6 +9,8 @@ release/*
 !release/*.exe
 !release/*.zip
 download/
+# 本地字幕模型/工具缓存（与 exe 或源码同级，勿提交）
+subtitle_tools/
 MakeEXE.bat
 desktop.ini
 jableTV.csv

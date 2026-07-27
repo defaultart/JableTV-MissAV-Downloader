@@ -387,10 +387,29 @@ def _read_srt_text(path: str) -> str:
         raise SubtitleError('Subtitle file encoding is unsupported') from exc
 
 
+def _app_base_dir() -> str:
+    """返回程序落盘基准目录：打包 exe 用可执行文件所在目录，源码运行用本文件所在目录。
+
+    字幕模型体积较大，放到 exe 同目录可避免写系统盘（C: 的 LocalAppData），
+    也便于用户整夹迁移或删除缓存。
+    """
+    # 冻结包（PyInstaller）优先跟随 exe，而不是临时解压目录 _MEIPASS
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def _cache_root() -> str:
-    base = (os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA')
-            or os.path.join(os.path.expanduser('~'), '.cache'))
-    return os.path.join(base, 'JableTV Downloader', 'subtitle_tools')
+    """返回字幕工具与本地模型缓存根目录。
+
+    环境变量 JABLE_SUBTITLE_CACHE 供测试或手动部署覆盖默认位置；未指定时，
+    缓存统一放到程序目录下，避免大型识别与翻译模型占用系统盘。
+    """
+    # 显式覆盖值可能来自启动脚本，去除首尾空白后再解析为绝对路径
+    override = (os.environ.get('JABLE_SUBTITLE_CACHE') or '').strip()
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(_app_base_dir(), 'subtitle_tools')
 
 
 @contextmanager

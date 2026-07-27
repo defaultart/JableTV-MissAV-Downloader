@@ -394,14 +394,41 @@ def _get_session():
 
 _cffi_tls = threading.local()
 _CDN_BLOCKED_MSG = "影片 CDN（surrit.com）被 Cloudflare 阻擋，請改用 VPN/WARP 或不同網路後重試"
+# 默认 alias 'chrome' 会随 curl_cffi 指向过新指纹；surrit 等 CDN 对本机默认档返回 403，
+# 中档 Chrome 指纹实测可过，故优先固定可用档，创建失败再回退。
+_CFFI_IMPERSONATE_CANDIDATES = (
+    'chrome131',
+    'chrome124',
+    'chrome120',
+    'chrome',
+)
 
 
 def _get_cffi_session():
+    """获取线程内复用的 curl_cffi Session。
+
+    优先使用实测可通过 CDN CF 的 impersonate 档位；某一档创建失败则尝试下一档。
+    成功档位 sticky 在线程本地，避免每个请求重复探测。
+    """
     session = getattr(_cffi_tls, 'session', None)
-    if session is None:
-        session = _cffi_requests.Session(impersonate='chrome')
-        _cffi_tls.session = session
-    return session
+    if session is not None:
+        return session
+    last_err = None
+    # 逐个尝试指纹档：前几档针对 surrit 等 CDN，最后 'chrome' 作兼容兜底
+    for name in _CFFI_IMPERSONATE_CANDIDATES:
+        try:
+            session = _cffi_requests.Session(impersonate=name)
+            _cffi_tls.session = session
+            _cffi_tls.impersonate = name
+            return session
+        except Exception as exc:
+            # 当前 curl_cffi 可能不支持该 alias，换下一档继续
+            last_err = exc
+            continue
+    # 所有候选都失败时再抛出，由 _http_get 回退到 requests
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError('curl_cffi Session 创建失败：无可用 impersonate')
 
 
 def _is_cf_block_resp(resp):
@@ -431,20 +458,31 @@ def _is_cf_block_resp(resp):
 
 
 def _http_get(url, headers=None, timeout=20):
+    """下载 m3u8/密钥/分片等媒体资源。
+
+    优先 curl_cffi（固定可用 Chrome 指纹）；若返回 Cloudflare 拦截页或传输异常，
+    再回退到 requests 并保留完整 headers（含 User-Agent / Referer / Origin）。
+    旧逻辑仅在抛异常时回退，导致 surrit 等 CDN 的 403 无法自愈。
+    """
+    full_headers = dict(headers or {})
+    proxy_kwargs = config.proxy_request_kwargs()
     if _use_cffi:
         try:
+            # cffi impersonate 自带 UA；请求头里再塞自定义 UA 易与 TLS 指纹不一致，故仍剥离
             cffi_headers = {
-                k: v for k, v in dict(headers or {}).items()
+                k: v for k, v in full_headers.items()
                 if str(k).lower() != 'user-agent'
             }
-            return _get_cffi_session().get(
-                url, headers=cffi_headers, timeout=timeout,
-                **config.proxy_request_kwargs())
+            resp = _get_cffi_session().get(
+                url, headers=cffi_headers, timeout=timeout, **proxy_kwargs)
+            # 403/挑战页视为失败，改走 requests（本机实测对 surrit 有效）
+            if not _is_cf_block_resp(resp):
+                return resp
         except Exception:
+            # 指纹创建失败或传输错误：落到下方 requests
             pass
     return _get_session().get(
-        url, headers=dict(headers or {}), timeout=timeout,
-        **config.proxy_request_kwargs())
+        url, headers=full_headers, timeout=timeout, **proxy_kwargs)
 
 
 class M3U8Crawler:

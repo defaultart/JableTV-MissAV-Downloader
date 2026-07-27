@@ -91,7 +91,7 @@ def test_interprocess_cache_lock_serializes_two_app_processes(tmp_path):
     log = tmp_path / 'lock-order.txt'
     code = (
         "import os,sys,time\n"
-        "os.environ['LOCALAPPDATA']=sys.argv[1]\n"
+        "os.environ['JABLE_SUBTITLE_CACHE']=sys.argv[1]\n"
         "from subtitle_engine import _interprocess_cache_lock\n"
         "name=sys.argv[2]\n"
         "log=sys.argv[3]\n"
@@ -127,7 +127,7 @@ def test_interprocess_cache_lock_serializes_two_app_processes(tmp_path):
 
 def test_translate_cues_uses_exact_domain_rules_and_dedupes_model_work(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     monkeypatch.setattr(
         subtitles, '_prepare_translation_runtime',
         lambda _progress, _cancel: {'ja-en': 'ja-model', 'en-zh': 'zh-model'})
@@ -148,7 +148,7 @@ def test_translate_cues_uses_exact_domain_rules_and_dedupes_model_work(
 
 def test_translate_cues_polishes_lowercase_english_model_output(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     monkeypatch.setattr(
         subtitles, '_prepare_translation_runtime',
         lambda _progress, _cancel: {'ja-en': 'ja-model', 'en-zh': 'zh-model'})
@@ -163,7 +163,7 @@ def test_translate_cues_polishes_lowercase_english_model_output(
 
 def test_japanese_to_chinese_pivot_keeps_raw_english_model_casing(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     monkeypatch.setattr(
         subtitles, '_prepare_translation_runtime',
         lambda _progress, _cancel: {'ja-en': 'ja-model', 'en-zh': 'zh-model'})
@@ -186,7 +186,7 @@ def test_japanese_to_chinese_pivot_keeps_raw_english_model_casing(
 
 def test_translate_cues_pivots_unknown_japanese_to_taiwan_chinese(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     monkeypatch.setattr(
         subtitles, '_prepare_translation_runtime',
         lambda _progress, _cancel: {'ja-en': 'ja-model', 'en-zh': 'zh-model'})
@@ -236,7 +236,7 @@ def test_local_model_honours_cancel_before_loading_runtime():
 
 def test_local_translation_memory_is_exact_and_versioned(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     versions = ['engine-v1']
     monkeypatch.setattr(
         subtitles, '_translation_memory_version', lambda: versions[0])
@@ -281,7 +281,7 @@ def test_translation_memory_version_includes_verified_model_manifest():
 
 def test_invalid_translation_memory_row_falls_back_to_model(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     source = '人工詞庫にない安全な文章'
     subtitles._translation_memory_store(
         {source: '00:00:00,000 --> 00:00:01,000'},
@@ -311,7 +311,7 @@ def test_obsolete_translation_backup_cleanup_is_best_effort(monkeypatch):
 
 def test_corrupt_translation_memory_fails_open_without_losing_output(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     path = subtitles._translation_memory_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'wb') as handle:
@@ -330,7 +330,7 @@ def test_corrupt_translation_memory_fails_open_without_losing_output(
 
 def test_chinese_stage_reuses_prior_english_model_result(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     monkeypatch.setattr(
         subtitles, '_prepare_translation_runtime',
         lambda _progress, _cancel: {'ja-en': 'ja-model', 'en-zh': 'zh-model'})
@@ -357,7 +357,7 @@ def test_chinese_stage_reuses_prior_english_model_result(
 
 def test_model_dedupe_keeps_terminal_punctuation_input_order_independent(
         monkeypatch, tmp_path):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
     monkeypatch.setattr(
         subtitles, '_prepare_translation_runtime',
         lambda _progress, _cancel: {'ja-en': 'ja-model', 'en-zh': 'zh-model'})

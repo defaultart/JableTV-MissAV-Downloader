@@ -27,7 +27,7 @@ def _sample_srt(text):
 
 def test_api_translates_only_unknown_cues_and_never_prepares_local_pack(
         monkeypatch, tmp_path):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("JABLE_SUBTITLE_CACHE", str(tmp_path))
     monkeypatch.setattr(
         subtitles,
         "_prepare_translation_runtime",
@@ -89,7 +89,7 @@ def test_api_cache_identity_uses_provider_model_endpoint_but_not_key():
 
 def test_api_translation_cache_hit_skips_network_and_local_runtime(
         monkeypatch, tmp_path):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("JABLE_SUBTITLE_CACHE", str(tmp_path))
     monkeypatch.setattr(
         subtitles,
         "_prepare_translation_runtime",
@@ -125,7 +125,7 @@ def test_api_translation_cache_hit_skips_network_and_local_runtime(
 
 def test_api_errors_and_cancellation_are_safely_mapped(
         monkeypatch, tmp_path):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("JABLE_SUBTITLE_CACHE", str(tmp_path))
     profile = _profile(api_key="must-never-leak")
 
     def fail_with_secret(*_args, **_kwargs):
@@ -161,7 +161,7 @@ def test_api_errors_and_cancellation_are_safely_mapped(
 
 def test_generate_api_chinese_uses_japanese_not_existing_english(
         monkeypatch, tmp_path):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "cache"))
+    monkeypatch.setenv("JABLE_SUBTITLE_CACHE", str(tmp_path / "cache"))
     video = tmp_path / "movie.mp4"
     video.write_bytes(b"video")
     japanese = tmp_path / "movie.ja.srt"
