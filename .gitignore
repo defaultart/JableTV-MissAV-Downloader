@@ -3,11 +3,8 @@
 *.DS_store
 .idea/
 build/
-build_tmp/
 dist/
-release/*
-!release/*.exe
-!release/*.zip
+release/
 download/
 # 本地字幕模型/工具缓存（与 exe 或源码同级，勿提交）
 subtitle_tools/
@@ -17,6 +14,8 @@ jableTV.csv
 JableTV.csv
 main.spec
 __pycache__/
+.pytest_cache/
+.Jable_smalltool/
 
 # local maintenance guide (machine-specific paths — auto-loads locally, don't publish)
 CLAUDE.md

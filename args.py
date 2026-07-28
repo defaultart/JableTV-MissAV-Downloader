@@ -17,6 +17,10 @@ def get_parser():
                         help="Jable TV URL to download")
     parser.add_argument("--nogui", action='store_true',
                         help="Disable GUI mode")
+    # 无界面下载需要独立指定保存位置；默认值保持与历史命令行行为一致。
+    parser.add_argument(
+        "-o", "--output", type=str, default="download", metavar="DIR",
+        help="Output directory for downloads (default: ./download)")
 
     return parser
 

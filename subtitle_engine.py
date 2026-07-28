@@ -647,6 +647,9 @@ def _verify_whisper_install(
             WHISPER_RUNTIME_FILES.items()):
         _check_cancel(cancel_check)
         path = os.path.join(folder, *relative_path.split('/'))
+        # 原生可执行文件涉及运行安全且体积较小，因此每次安装校验都重新计算哈希。
+        # Windows 可能在等长快速覆盖后保留大小和时间戳，仅依赖元数据缓存无法确认文件未变。
+        _verified_paths.pop(os.path.abspath(path), None)
         if not _is_verified(
                 path, expected_size, expected_sha256, cancel_check):
             return None

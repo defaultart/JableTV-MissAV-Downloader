@@ -1,4 +1,3 @@
-# author: ALOS (Alos21750)
 #!/usr/bin/env python
 # coding: utf-8
 
@@ -125,8 +124,9 @@ except Exception:
     except Exception:
         pass
 
-from args import *
+from args import av_recommand, get_parser
 import config
+import M3U8Sites
 
 # Use modern CustomTkinter GUI by default; fall back to basic tkinter if unavailable
 try:
@@ -135,13 +135,6 @@ try:
 except ImportError:
     from gui import gui_main as _gui_main
     _USE_MODERN = False
-
-''' Default folder to save the download files
-    "" or None : same as the url's last stem,  ie:  "abc-001" for url = "https://jable.tv/videos/abc-001/"
-    others : relative to the current folder, or an absolute path  
-    '''
-save_folder = config.get_download_directory()
-
 
 if __name__ == "__main__":
     url_arg = ""
@@ -154,11 +147,24 @@ if __name__ == "__main__":
         url_arg = av_recommand() or ""   # None (site changed/blocked) -> empty, not a crash
 
     if args.nogui:
-        M3U8Sites.consoles_main(url_arg, save_folder)
-    elif _USE_MODERN:
-        _gui_main(url_arg, save_folder)
+        # 无界面模式始终采用命令行输出目录，确保上游恢复的 -o/--output 参数真实生效。
+        M3U8Sites.consoles_main(url_arg, args.output)
     else:
-        from gui import gui_main
-        gui_main(url_arg, save_folder)
+        # GUI 未显式指定输出目录时沿用用户持久化设置，避免同步上游后重置为 download。
+        output_option_names = {'-o', '--output'}
+        has_output_option = any(
+            argument in output_option_names
+            or argument.startswith('--output=')
+            for argument in sys.argv[1:])
+        gui_output = (
+            args.output if has_output_option
+            else config.get_download_directory())
+
+        # 优先调用现代界面；依赖不可用时沿用既有 tkinter 回退入口。
+        if _USE_MODERN:
+            _gui_main(url_arg, gui_output)
+        else:
+            from gui import gui_main
+            gui_main(url_arg, gui_output)
 
     sys.exit(0)

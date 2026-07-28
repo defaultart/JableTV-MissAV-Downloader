@@ -831,6 +831,11 @@ def test_simplified_failure_does_not_leave_unrequested_sidecars(
 
 def test_chinese_reuses_existing_english_without_whisper(
         monkeypatch, tmp_path):
+    # 固定为本地翻译配置，避免开发机持久化的 API 设置改变“复用英文字幕”的测试路径。
+    local_profile = SimpleNamespace(
+        provider='local', model='', base_url='', api_key='', uses_api=False)
+    monkeypatch.setattr(
+        subtitles, '_selected_translation_profile', lambda: local_profile)
     video = tmp_path / 'movie.mp4'
     video.write_bytes(b'video')
     english = tmp_path / 'movie.en.srt'
@@ -859,6 +864,11 @@ def test_chinese_reuses_existing_english_without_whisper(
 
 def test_simplified_reuses_existing_english_without_other_sidecars(
         monkeypatch, tmp_path):
+    # 简体字幕同样验证本地翻译路径，测试结果不应依赖运行测试的用户配置。
+    local_profile = SimpleNamespace(
+        provider='local', model='', base_url='', api_key='', uses_api=False)
+    monkeypatch.setattr(
+        subtitles, '_selected_translation_profile', lambda: local_profile)
     video = tmp_path / 'movie.mp4'
     video.write_bytes(b'video')
     english = tmp_path / 'movie.en.srt'
