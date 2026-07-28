@@ -64,6 +64,28 @@ def test_api_translates_only_unknown_cues_and_never_prepares_local_pack(
     assert kwargs["api_key"] == "test-secret"
 
 
+def test_api_simplified_chinese_uses_mainland_target_and_normalization(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("JABLE_SUBTITLE_CACHE", str(tmp_path))
+    calls = []
+
+    def fake_translate(texts, _settings, **kwargs):
+        calls.append((list(texts), kwargs))
+        return SimpleNamespace(translations=("軟體和影片在這裡。",))
+
+    monkeypatch.setattr(llm_translation, "translate_cues", fake_translate)
+    with subtitles._translation_profile_scope(_profile()):
+        result = subtitles.translate_cues(
+            ["人工詞庫にない簡体字文章"],
+            "ja",
+            "zh-CN",
+            "translate_zh_cn",
+        )
+
+    assert result == ["软件和视频在这里。"]
+    assert calls[0][1]["target_language"] == "Mainland Simplified Chinese"
+
+
 def test_api_cache_identity_uses_provider_model_endpoint_but_not_key():
     original = _profile(api_key="first-key")
     same_identity = _profile(api_key="second-key")

@@ -168,6 +168,8 @@ def test_config_subtitle_mode_round_trip_and_validation(tmp_path, monkeypatch):
     monkeypatch.setattr(config, '_ui_prefs_path', lambda: str(path))
 
     assert config.get_subtitle_pref() == 'none'
+    config.set_subtitle_pref('zh-cn')
+    assert config.get_subtitle_pref() == 'zh-cn'
     config.set_subtitle_pref('all')
     assert config.get_subtitle_pref() == 'all'
 

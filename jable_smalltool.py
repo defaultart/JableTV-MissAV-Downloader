@@ -168,7 +168,7 @@ from translation_settings_ui import (
 # one-file builds should be able to paint the window before importing requests,
 # FFmpeg discovery, and the subtitle runtime; those are only needed after a
 # video has finished downloading.
-_VALID_SUBTITLE_MODES = {'none', 'ja', 'en', 'zh', 'all'}
+_VALID_SUBTITLE_MODES = {'none', 'ja', 'en', 'zh', 'zh-cn', 'all'}
 
 
 def normalize_subtitle_mode(value) -> str:
@@ -1456,6 +1456,7 @@ class SmallToolWorker:
                     'transcribe_ja': 'subtitle_stage_transcribe_ja',
                     'translate_en': 'subtitle_stage_translate_en',
                     'translate_zh': 'subtitle_stage_translate_zh',
+                    'translate_zh_cn': 'subtitle_stage_translate_zh_cn',
                 }
 
                 def _subtitle_progress(stage, percent):
@@ -1910,6 +1911,7 @@ class SmallToolApp(ctk.CTk):
             'ja': T('subtitle_ja'),
             'en': T('subtitle_en'),
             'zh': T('subtitle_zh'),
+            'zh-cn': T('subtitle_zh_cn'),
             'all': T('subtitle_all'),
         }.get(normalize_subtitle_mode(self._cfg.get('subtitle_mode')),
               T('subtitle_none'))
@@ -1917,7 +1919,7 @@ class SmallToolApp(ctk.CTk):
     def _subtitle_values(self) -> list[str]:
         return [
             T('subtitle_none'), T('subtitle_ja'), T('subtitle_en'),
-            T('subtitle_zh'), T('subtitle_all'),
+            T('subtitle_zh'), T('subtitle_zh_cn'), T('subtitle_all'),
         ]
 
     def _subtitle_pref_from_label(self, label: str) -> str:
@@ -1926,6 +1928,7 @@ class SmallToolApp(ctk.CTk):
             T('subtitle_ja'): 'ja',
             T('subtitle_en'): 'en',
             T('subtitle_zh'): 'zh',
+            T('subtitle_zh_cn'): 'zh-cn',
             T('subtitle_all'): 'all',
         }.get(str(label or ''), 'none')
 

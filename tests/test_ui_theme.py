@@ -260,6 +260,21 @@ def test_modern_concurrency_is_editable_persisted_and_clamped(monkeypatch):
     assert app._conc_var.get() == '32'
 
 
+def test_simplified_subtitle_option_is_available_in_both_guis():
+    locales.set_lang('zh-Hans')
+    simplified = locales.T('subtitle_zh_cn')
+
+    modern = gui_modern.ModernApp.__new__(gui_modern.ModernApp)
+    smalltool = jable_smalltool.SmallToolApp.__new__(
+        jable_smalltool.SmallToolApp)
+
+    assert simplified in modern._subtitle_values()
+    assert modern._subtitle_pref_from_label(simplified) == 'zh-cn'
+    assert simplified in smalltool._subtitle_values()
+    assert smalltool._subtitle_pref_from_label(simplified) == 'zh-cn'
+    assert jable_smalltool.normalize_subtitle_mode('zh-cn') == 'zh-cn'
+
+
 def test_global_version_selector_saves_internal_preference(monkeypatch):
     app = jable_smalltool.SmallToolApp.__new__(jable_smalltool.SmallToolApp)
     app._cfg = {}

@@ -100,6 +100,7 @@ _SUBTITLE_STATE_BY_STAGE = {
     'transcribe_ja': '字幕辨識中',
     'translate_en': '字幕翻譯中',
     'translate_zh': '字幕翻譯中',
+    'translate_zh_cn': '字幕翻譯中',
 }
 
 
@@ -1235,7 +1236,7 @@ class ModernApp(ctk.CTk):
     def _subtitle_values(self):
         return [
             T('subtitle_none'), T('subtitle_ja'), T('subtitle_en'),
-            T('subtitle_zh'), T('subtitle_all'),
+            T('subtitle_zh'), T('subtitle_zh_cn'), T('subtitle_all'),
         ]
 
     def _subtitle_pref_from_label(self, label):
@@ -1244,6 +1245,7 @@ class ModernApp(ctk.CTk):
             T('subtitle_ja'): 'ja',
             T('subtitle_en'): 'en',
             T('subtitle_zh'): 'zh',
+            T('subtitle_zh_cn'): 'zh-cn',
             T('subtitle_all'): 'all',
         }.get(str(label or ''), 'none')
 
@@ -1253,6 +1255,7 @@ class ModernApp(ctk.CTk):
             'ja': T('subtitle_ja'),
             'en': T('subtitle_en'),
             'zh': T('subtitle_zh'),
+            'zh-cn': T('subtitle_zh_cn'),
             'all': T('subtitle_all'),
         }.get(config.get_subtitle_pref(), T('subtitle_none'))
 

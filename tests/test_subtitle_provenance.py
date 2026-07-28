@@ -1,4 +1,5 @@
 import shutil
+import json
 
 import subtitle_engine as subtitles
 
@@ -109,6 +110,20 @@ def test_corrupt_provenance_never_claims_or_overwrites_existing_srt(
     assert result.files == (str(japanese),)
     assert result.generated == ()
     assert japanese.read_text(encoding='utf-8') == _srt('User subtitle')
+
+
+def test_simplified_and_traditional_provenance_tracks_coexist(tmp_path):
+    manifest = tmp_path / 'movie.jable-subtitles.json'
+    payload = subtitles._empty_subtitle_provenance()
+    payload['tracks'] = {
+        'zh-TW': {'generator': 'jable', 'srt_sha256': '1' * 64},
+        'zh-CN': {'generator': 'jable', 'srt_sha256': '2' * 64},
+    }
+
+    subtitles._save_subtitle_provenance(str(manifest), payload)
+    loaded = subtitles._load_subtitle_provenance(str(manifest))
+
+    assert set(loaded['tracks']) == {'zh-TW', 'zh-CN'}
 
 
 def test_no_speech_removes_only_an_obsolete_app_owned_sidecar(

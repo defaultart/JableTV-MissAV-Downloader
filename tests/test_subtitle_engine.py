@@ -19,10 +19,18 @@ def _sample_srt(text='こんにちは'):
 
 def test_normalize_modes_and_language_outputs():
     assert subtitles.normalize_subtitle_mode('zh-TW') == 'zh'
+    assert subtitles.normalize_subtitle_mode('zh-Hans') == 'zh-cn'
+    assert subtitles.normalize_subtitle_mode(
+        'simplified-chinese') == 'zh-cn'
     assert subtitles.normalize_subtitle_mode('multilingual') == 'all'
     assert subtitles.normalize_subtitle_mode('unknown') == 'none'
-    assert subtitles.subtitle_languages('all') == ('ja', 'en', 'zh-TW')
+    assert subtitles.subtitle_languages('all') == (
+        'ja', 'en', 'zh-TW', 'zh-CN')
+    assert subtitles.subtitle_languages('zh-cn') == ('zh-CN',)
     assert subtitles.subtitle_languages('none') == ()
+    paths = subtitles.subtitle_paths('movie.mp4')
+    assert paths['zh-TW'].endswith('movie.zh-TW.srt')
+    assert paths['zh-CN'].endswith('movie.zh-CN.srt')
 
 
 def test_parse_and_render_srt_round_trip():
@@ -220,6 +228,42 @@ def test_translate_cues_pivots_unknown_japanese_to_taiwan_chinese(
     assert percentages[-1] == 100
 
 
+def test_translate_cues_pivots_unknown_japanese_to_simplified_chinese(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv('JABLE_SUBTITLE_CACHE', str(tmp_path))
+    monkeypatch.setattr(
+        subtitles, '_prepare_translation_runtime',
+        lambda _progress, _cancel: {
+            'ja-en': 'ja-model', 'en-zh': 'zh-model'})
+    calls = []
+
+    def fake_model(model_dir, texts, target_token, _cancel):
+        calls.append((model_dir, list(texts), target_token))
+        if model_dir == 'ja-model':
+            return ['This is a video.' for _ in texts]
+        return ['这是一个视频。' for _ in texts]
+
+    monkeypatch.setattr(subtitles, '_run_local_model', fake_model)
+    monkeypatch.setattr(
+        subtitles, '_to_mainland_chinese', lambda text: text)
+
+    result = subtitles.translate_cues(
+        ['人工詞庫にない長い文章です。'],
+        'ja', 'zh-CN', 'translate_zh_cn')
+
+    assert result == ['这是一个视频。']
+    assert calls == [
+        ('ja-model', ['人工詞庫にない長い文章です'], None),
+        ('zh-model', ['This is a video'], '>>cmn_Hans<<'),
+    ]
+
+
+def test_simplified_exact_translation_uses_mainland_terms():
+    assert subtitles.translate_cues(
+        ['動画を撮って'],
+        'ja', 'zh-CN', 'translate_zh_cn') == ['拍视频。']
+
+
 def test_exact_japanese_to_taiwan_translation_honours_immediate_cancel():
     with pytest.raises(subtitles.SubtitleCancelled):
         subtitles.translate_cues(
@@ -399,12 +443,17 @@ def test_local_translation_diagnostic_writes_complete_atomic_evidence(
             ['English diagnostic.']
             if target_language == 'en'
             else ['繁中診斷。']
+            if target_language == 'zh-TW'
+            else ['简中诊断。']
         )
 
     monkeypatch.setattr(subtitles, 'translate_cues', fake_translate)
     monkeypatch.setattr(
         subtitles, '_to_taiwan_chinese',
         lambda _text: '軟體和影片在這裡。')
+    monkeypatch.setattr(
+        subtitles, '_to_mainland_chinese',
+        lambda _text: '软件和视频在这里。')
     output = tmp_path / 'diagnostic.json'
 
     payload = subtitles.run_local_translation_diagnostic(str(output))
@@ -412,11 +461,13 @@ def test_local_translation_diagnostic_writes_complete_atomic_evidence(
     assert payload['schema'] == 1
     assert payload['english'] == 'English diagnostic.'
     assert payload['taiwan'] == '繁中診斷。'
+    assert payload['mainland'] == '简中诊断。'
     assert payload['opencc'] == '軟體和影片在這裡。'
+    assert payload['opencc_mainland'] == '软件和视频在这里。'
     assert payload['phrase_count'] >= 900
     assert json.loads(output.read_text(encoding='utf-8')) == payload
     assert not list(tmp_path.glob('*.tmp'))
-    assert [call[2] for call in calls] == ['en', 'zh-TW']
+    assert [call[2] for call in calls] == ['en', 'zh-TW', 'zh-CN']
 
 
 def test_llm_translation_diagnostic_uses_api_branch_and_redacts_evidence(
@@ -665,7 +716,7 @@ def test_translate_srt_rejects_empty_source_without_creating_sidecar(tmp_path):
     assert not destination.exists()
 
 
-def test_generate_all_creates_three_selectable_sidecars(monkeypatch, tmp_path):
+def test_generate_all_creates_four_selectable_sidecars(monkeypatch, tmp_path):
     video = tmp_path / 'movie.mp4'
     video.write_bytes(b'video')
     stages = []
@@ -712,11 +763,13 @@ def test_generate_all_creates_three_selectable_sidecars(monkeypatch, tmp_path):
         str(video), 'all', progress_callback=lambda stage, pct: stages.append((stage, pct)))
 
     assert [os.path.basename(path) for path in result.files] == [
-        'movie.ja.srt', 'movie.en.srt', 'movie.zh-TW.srt']
+        'movie.ja.srt', 'movie.en.srt',
+        'movie.zh-TW.srt', 'movie.zh-CN.srt']
     assert all(os.path.isfile(path) for path in result.files)
     assert ('transcribe_ja', None) in stages
     assert ('translate_en', None) in stages
     assert ('translate_zh', 100) in stages
+    assert ('translate_zh_cn', 100) in stages
     assert stages[-1] == ('done', 100)
 
 
@@ -747,6 +800,35 @@ def test_chinese_failure_does_not_leave_unrequested_japanese(
     assert not (tmp_path / 'movie.zh-TW.srt').exists()
 
 
+def test_simplified_failure_does_not_leave_unrequested_sidecars(
+        monkeypatch, tmp_path):
+    video = tmp_path / 'movie.mp4'
+    video.write_bytes(b'video')
+    monkeypatch.setattr(
+        subtitles, '_prepare_runtime',
+        lambda _cb, _cancel: ('whisper.exe', 'model.bin', 'vad.bin'))
+    monkeypatch.setattr(
+        subtitles, '_extract_audio',
+        lambda _v, wav, _l, _c: open(wav, 'wb').close())
+
+    def fake_whisper(_exe, _model, _vad, _wav, output_base, _log, _cancel):
+        output = output_base + '.srt'
+        with open(output, 'w', encoding='utf-8') as handle:
+            handle.write(_sample_srt())
+        return output
+
+    monkeypatch.setattr(subtitles, '_run_whisper', fake_whisper)
+    monkeypatch.setattr(
+        subtitles, 'translate_srt_to_zh_cn',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subtitles.SubtitleError('translation unavailable')))
+
+    with pytest.raises(subtitles.SubtitleError):
+        subtitles.generate_subtitles(str(video), 'zh-cn')
+    for language in ('ja', 'en', 'zh-TW', 'zh-CN'):
+        assert not (tmp_path / f'movie.{language}.srt').exists()
+
+
 def test_chinese_reuses_existing_english_without_whisper(
         monkeypatch, tmp_path):
     video = tmp_path / 'movie.mp4'
@@ -775,16 +857,44 @@ def test_chinese_reuses_existing_english_without_whisper(
     assert not (tmp_path / 'movie.ja.srt').exists()
 
 
+def test_simplified_reuses_existing_english_without_other_sidecars(
+        monkeypatch, tmp_path):
+    video = tmp_path / 'movie.mp4'
+    video.write_bytes(b'video')
+    english = tmp_path / 'movie.en.srt'
+    english.write_text(_sample_srt('Existing English.'), encoding='utf-8')
+    monkeypatch.setattr(
+        subtitles, '_prepare_runtime',
+        lambda *_args: pytest.fail('English SRT should avoid Whisper'))
+
+    def fake_simplified(source, destination, progress_callback=None,
+                        cancel_check=None, source_language='ja'):
+        assert source == str(english)
+        assert source_language == 'en'
+        with open(destination, 'w', encoding='utf-8') as handle:
+            handle.write(_sample_srt('已有简中。'))
+        return destination
+
+    monkeypatch.setattr(
+        subtitles, 'translate_srt_to_zh_cn', fake_simplified)
+    result = subtitles.generate_subtitles(str(video), 'zh-cn')
+
+    assert [os.path.basename(path) for path in result.files] == [
+        'movie.zh-CN.srt']
+    assert not (tmp_path / 'movie.ja.srt').exists()
+    assert not (tmp_path / 'movie.zh-TW.srt').exists()
+
+
 def test_existing_outputs_skip_runtime(monkeypatch, tmp_path):
     video = tmp_path / 'movie.mp4'
     video.write_bytes(b'video')
-    for language in ('ja', 'en', 'zh-TW'):
+    for language in ('ja', 'en', 'zh-TW', 'zh-CN'):
         (tmp_path / f'movie.{language}.srt').write_text(_sample_srt(), encoding='utf-8')
     monkeypatch.setattr(
         subtitles, '_prepare_runtime',
         lambda *_args: pytest.fail('runtime must not be prepared'))
     result = subtitles.generate_subtitles(str(video), 'all')
-    assert len(result.files) == 3
+    assert len(result.files) == 4
     assert result.generated == ()
 
 

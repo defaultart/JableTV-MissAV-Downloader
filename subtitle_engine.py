@@ -180,7 +180,7 @@ TRANSLATION_MANIFEST_SHA256 = (
 )
 TRANSLATION_ENGINE_VERSION = (
     f'fugumt-opus-ct2-int8-v{TRANSLATION_PACK_VERSION}')
-VALID_SUBTITLE_MODES = {'none', 'ja', 'en', 'zh', 'all'}
+VALID_SUBTITLE_MODES = {'none', 'ja', 'en', 'zh', 'zh-cn', 'all'}
 VALID_RECOGNITION_QUALITIES = frozenset(RECOGNITION_PROFILES)
 
 # v1.9.1 Silero validation: 0.35 rejected silence, low-level noise, tones,
@@ -325,6 +325,8 @@ def normalize_subtitle_mode(value) -> str:
         'jp': 'ja', 'japanese': 'ja',
         'english': 'en',
         'zh-tw': 'zh', 'traditional-chinese': 'zh', 'chinese': 'zh',
+        'zh-cn': 'zh-cn', 'zh-hans': 'zh-cn',
+        'simplified-chinese': 'zh-cn',
         'multi': 'all', 'multilingual': 'all',
     }
     mode = aliases.get(mode, mode)
@@ -334,9 +336,11 @@ def normalize_subtitle_mode(value) -> str:
 def subtitle_languages(mode) -> tuple[str, ...]:
     mode = normalize_subtitle_mode(mode)
     if mode == 'all':
-        return ('ja', 'en', 'zh-TW')
+        return ('ja', 'en', 'zh-TW', 'zh-CN')
     if mode == 'zh':
         return ('zh-TW',)
+    if mode == 'zh-cn':
+        return ('zh-CN',)
     if mode in ('ja', 'en'):
         return (mode,)
     return ()
@@ -348,6 +352,7 @@ def subtitle_paths(video_path: str) -> dict[str, str]:
         'ja': stem + '.ja.srt',
         'en': stem + '.en.srt',
         'zh-TW': stem + '.zh-TW.srt',
+        'zh-CN': stem + '.zh-CN.srt',
     }
 
 
@@ -2001,7 +2006,7 @@ def _restore_terminal_punctuation(
     result = str(translated or '').strip()
     if not source or not result:
         return result
-    if target_language == 'zh-TW':
+    if target_language in ('zh-TW', 'zh-CN'):
         result = re.sub(r'\?$', '？', result)
         result = re.sub(r'!$', '！', result)
         result = re.sub(r'\.$', '。', result)
@@ -2009,13 +2014,17 @@ def _restore_terminal_punctuation(
         return result
     source = source.rstrip()
     if source.endswith(('?', '？')):
-        return result + ('？' if target_language == 'zh-TW' else '?')
+        return result + (
+            '？' if target_language in ('zh-TW', 'zh-CN') else '?')
     if source.endswith(('!', '！')):
-        return result + ('！' if target_language == 'zh-TW' else '!')
+        return result + (
+            '！' if target_language in ('zh-TW', 'zh-CN') else '!')
     if source.endswith(('...', '…')):
-        return result + ('……' if target_language == 'zh-TW' else '…')
+        return result + (
+            '……' if target_language in ('zh-TW', 'zh-CN') else '…')
     if source.endswith(('.', '。')):
-        return result + ('。' if target_language == 'zh-TW' else '.')
+        return result + (
+            '。' if target_language in ('zh-TW', 'zh-CN') else '.')
     return result
 
 
@@ -2117,6 +2126,35 @@ def _to_taiwan_chinese(text: str) -> str:
     return postprocess_taiwan(converted)
 
 
+@lru_cache(maxsize=1)
+def _mainland_converter():
+    from opencc import OpenCC
+    return OpenCC('tw2sp')
+
+
+def _to_mainland_chinese(text: str) -> str:
+    """将中文输出统一为中国大陆简体字和常用词。"""
+    try:
+        return _mainland_converter().convert(text)
+    except Exception as exc:
+        raise SubtitleError(
+            'Mainland Chinese conversion runtime is unavailable') from exc
+
+
+def _exact_translation_for_target(
+        text: str, source_language: str,
+        target_language: str) -> Optional[str]:
+    """复用已校对繁中词库，为简中生成等义的大陆用词结果。"""
+    from subtitle_domain import exact_translation
+    if target_language == 'zh-CN':
+        translated = exact_translation(text, source_language, 'zh-TW')
+        return (
+            None if translated is None
+            else _to_mainland_chinese(translated)
+        )
+    return exact_translation(text, source_language, target_language)
+
+
 def _translate_direct(
         texts: list[str], source_language: str, target_language: str,
         progress_stage: str,
@@ -2130,7 +2168,7 @@ def _translate_direct(
     )
 
     if (source_language, target_language) not in {
-            ('ja', 'en'), ('en', 'zh-TW')}:
+            ('ja', 'en'), ('en', 'zh-TW'), ('en', 'zh-CN')}:
         raise SubtitleError(
             f'Unsupported local translation pair: '
             f'{source_language} -> {target_language}')
@@ -2172,7 +2210,9 @@ def _translate_direct(
             progress_callback, cancel_check)
         model_key = 'ja-en' if source_language == 'ja' else 'en-zh'
         target_token = (
-            '>>cmn_Hant<<' if target_language == 'zh-TW' else None)
+            '>>cmn_Hant<<' if target_language == 'zh-TW'
+            else '>>cmn_Hans<<' if target_language == 'zh-CN'
+            else None)
         model_outputs = _run_local_model(
             models[model_key],
             [representative[source] for source in misses],
@@ -2184,6 +2224,8 @@ def _translate_direct(
         for source, translated in zip(misses, model_outputs):
             if target_language == 'zh-TW':
                 translated = _to_taiwan_chinese(translated)
+            elif target_language == 'zh-CN':
+                translated = _to_mainland_chinese(translated)
             translated = _restore_terminal_punctuation(
                 representative[source], translated, target_language)
             translated = _validate_translation(source, translated)
@@ -2249,12 +2291,13 @@ def _translate_api_direct(
         translate_cues as translate_llm_cues,
     )
     from subtitle_domain import (
-        exact_translation,
         normalize_cue,
         postprocess_english,
     )
 
-    if source_language != 'ja' or target_language not in ('en', 'zh-TW'):
+    if (
+            source_language != 'ja'
+            or target_language not in ('en', 'zh-TW', 'zh-CN')):
         raise SubtitleError(
             'External translation requires Japanese source subtitles')
     if not texts:
@@ -2268,7 +2311,7 @@ def _translate_api_direct(
     }
     resolved: dict[str, str] = {}
     for source in unique:
-        override = exact_translation(
+        override = _exact_translation_for_target(
             representative[source], 'ja', target_language)
         if override is not None:
             resolved[source] = override
@@ -2306,7 +2349,11 @@ def _translate_api_direct(
                 target_language=(
                     'English'
                     if target_language == 'en'
-                    else 'Taiwan Traditional Chinese'
+                    else (
+                        'Taiwan Traditional Chinese'
+                        if target_language == 'zh-TW'
+                        else 'Mainland Simplified Chinese'
+                    )
                 ),
                 cancel_check=cancel_check,
                 progress_callback=report_api_progress,
@@ -2341,6 +2388,8 @@ def _translate_api_direct(
             _check_cancel(cancel_check)
             if target_language == 'zh-TW':
                 translated = _to_taiwan_chinese(translated)
+            elif target_language == 'zh-CN':
+                translated = _to_mainland_chinese(translated)
             translated = _restore_terminal_punctuation(
                 representative[source], translated, target_language)
             translated = _validate_translation(
@@ -2386,12 +2435,14 @@ def translate_cues(
             texts, source_language, target_language, progress_stage,
             progress_callback, cancel_check, profile)
     if (source_language, target_language) in {
-            ('ja', 'en'), ('en', 'zh-TW')}:
+            ('ja', 'en'), ('en', 'zh-TW'), ('en', 'zh-CN')}:
         return _translate_direct(
             texts, source_language, target_language, progress_stage,
             progress_callback, cancel_check)
-    if (source_language, target_language) == ('ja', 'zh-TW'):
-        from subtitle_domain import exact_translation, normalize_cue
+    if (
+            source_language == 'ja'
+            and target_language in ('zh-TW', 'zh-CN')):
+        from subtitle_domain import normalize_cue
         model_inputs = [_clean_model_text(text) for text in texts]
         normalized = [normalize_cue(text) for text in model_inputs]
         output: list[Optional[str]] = [None] * len(texts)
@@ -2402,7 +2453,8 @@ def translate_cues(
             if not source:
                 output[index] = ''
                 continue
-            override = exact_translation(model_input, 'ja', 'zh-TW')
+            override = _exact_translation_for_target(
+                model_input, 'ja', target_language)
             if override is None:
                 unresolved_indices.append(index)
             else:
@@ -2426,7 +2478,7 @@ def translate_cues(
                 pivot_progress(0), cancel_check,
                 polish_english_output=False)
             chinese = _translate_direct(
-                english, 'en', 'zh-TW', progress_stage,
+                english, 'en', target_language, progress_stage,
                 pivot_progress(50), cancel_check)
             for index, translated in zip(unresolved_indices, chinese):
                 _check_cancel(cancel_check)
@@ -2473,6 +2525,17 @@ def translate_srt_to_zh_tw(
         source_language: str = 'ja') -> str:
     return translate_srt(
         source_path, destination_path, 'zh-TW', 'translate_zh',
+        progress_callback, cancel_check, source_language=source_language)
+
+
+def translate_srt_to_zh_cn(
+        source_path: str, destination_path: str,
+        progress_callback: Optional[ProgressCallback] = None,
+        cancel_check: Optional[CancelCheck] = None,
+        source_language: str = 'ja') -> str:
+    """生成中国大陆简体中文字幕文件。"""
+    return translate_srt(
+        source_path, destination_path, 'zh-CN', 'translate_zh_cn',
         progress_callback, cancel_check, source_language=source_language)
 
 
@@ -2598,6 +2661,8 @@ def run_local_translation_diagnostic(destination_path: str) -> dict:
         [source], 'ja', 'en', 'diagnostic_translate_en')[0]
     taiwan = translate_cues(
         [source], 'ja', 'zh-TW', 'diagnostic_translate_zh')[0]
+    mainland = translate_cues(
+        [source], 'ja', 'zh-CN', 'diagnostic_translate_zh_cn')[0]
     from subtitle_domain import (
         DOMAIN_VERSION,
         GLOSSARY_VERSION,
@@ -2615,7 +2680,9 @@ def run_local_translation_diagnostic(destination_path: str) -> dict:
         'source': source,
         'english': english,
         'taiwan': taiwan,
+        'mainland': mainland,
         'opencc': _to_taiwan_chinese('软件和视频在这里。'),
+        'opencc_mainland': _to_mainland_chinese('軟體和影片在這裡。'),
     }
     _atomic_write_text(
         destination,
@@ -2874,7 +2941,8 @@ def _load_subtitle_provenance(path: str) -> dict:
     tracks = {
         language: dict(entry)
         for language, entry in payload['tracks'].items()
-        if language in ('ja', 'en', 'zh-TW') and isinstance(entry, dict)
+        if language in ('ja', 'en', 'zh-TW', 'zh-CN')
+        and isinstance(entry, dict)
     }
     return {
         'schema': SUBTITLE_PROVENANCE_SCHEMA,
@@ -2893,7 +2961,7 @@ def _save_subtitle_provenance(path: str, payload: dict) -> None:
         'tracks': {
             language: entry
             for language, entry in tracks.items()
-            if language in ('ja', 'en', 'zh-TW')
+            if language in ('ja', 'en', 'zh-TW', 'zh-CN')
             and isinstance(entry, dict)
         },
     }
@@ -3042,8 +3110,9 @@ def generate_subtitles(video_path: str, mode,
                        cancel_check: Optional[CancelCheck] = None) -> SubtitleResult:
     """Generate requested sidecar SRT files next to ``video_path``.
 
-    Output names are ``.ja.srt``, ``.en.srt``, and ``.zh-TW.srt`` so media
-    players can expose them as independently selectable subtitle tracks.
+    Output names are ``.ja.srt``, ``.en.srt``, ``.zh-TW.srt``, and
+    ``.zh-CN.srt`` so media players can expose them as independently
+    selectable subtitle tracks.
     """
     normalized = normalize_subtitle_mode(mode)
     requested = subtitle_languages(normalized)
@@ -3079,7 +3148,7 @@ def generate_subtitles(video_path: str, mode,
         # translation engine is part of freshness.
         derived_requested = [
             language for language in requested
-            if language in ('en', 'zh-TW')
+            if language in ('en', 'zh-TW', 'zh-CN')
         ]
         derived_preliminary = {
             language: _subtitle_track_state(
@@ -3113,10 +3182,14 @@ def generate_subtitles(video_path: str, mode,
         zh_state = _subtitle_track_state(
             'zh-TW', paths['zh-TW'], entries.get('zh-TW'), asr_signature,
             media_identity, translation_signature, zh_expected_identity)
+        zh_cn_state = _subtitle_track_state(
+            'zh-CN', paths['zh-CN'], entries.get('zh-CN'), asr_signature,
+            media_identity, translation_signature, zh_expected_identity)
         states = {
             'ja': ja_state,
             'en': en_state,
             'zh-TW': zh_state,
+            'zh-CN': zh_cn_state,
         }
         missing = [
             language for language in requested
@@ -3143,9 +3216,10 @@ def generate_subtitles(video_path: str, mode,
         need_japanese_source = bool(
             'ja' in missing
             or 'en' in missing
-            or (
-                'zh-TW' in missing
+            or any(
+                language in missing
                 and (uses_api or not existing_english)
+                for language in ('zh-TW', 'zh-CN')
             )
         )
         need_whisper = bool(
@@ -3247,7 +3321,11 @@ def generate_subtitles(video_path: str, mode,
                     except Exception:
                         raise
 
-                if 'zh-TW' in missing:
+                for chinese_language, translate_chinese in (
+                        ('zh-TW', translate_srt_to_zh_tw),
+                        ('zh-CN', translate_srt_to_zh_cn)):
+                    if chinese_language not in missing:
+                        continue
                     english_source = (
                         paths['en']
                         if paths['en'] in generated
@@ -3281,18 +3359,19 @@ def generate_subtitles(video_path: str, mode,
                             'Japanese or English transcription is unavailable')
                     source_sha256 = _sha256(chinese_source)
                     try:
-                        translate_srt_to_zh_tw(
-                            chinese_source, paths['zh-TW'],
+                        translate_chinese(
+                            chinese_source, paths[chinese_language],
                             progress_callback, cancel_check,
                             source_language=chinese_source_language)
                         _record_derived_track(
-                            manifest, 'zh-TW', paths['zh-TW'],
+                            manifest, chinese_language,
+                            paths[chinese_language],
                             asr_signature, media_identity,
                             translation_signature,
                             chinese_source_identity, source_sha256)
                         _save_subtitle_provenance(
                             provenance_path, manifest)
-                        generated.append(paths['zh-TW'])
+                        generated.append(paths[chinese_language])
                     except SubtitleCancelled:
                         raise
                     except Exception:
