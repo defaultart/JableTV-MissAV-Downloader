@@ -2946,7 +2946,7 @@ class ModernApp(ctk.CTk):
     def _pick_dest(self):
         d = filedialog.askdirectory()
         if d:
-            self._dest_var.set(d)
+            self._dest_var.set(config.set_download_directory(d))
 
     def _open_dest_folder(self):
         import subprocess, platform
@@ -3406,6 +3406,7 @@ class ModernApp(ctk.CTk):
     # ── Close ────────────────────────────────────────────────────────
     def _on_close(self):
         self._is_closing = True
+        config.set_download_directory(self._dest_var.get())
         if self._dl_drain_id:
             try:
                 self.after_cancel(self._dl_drain_id)

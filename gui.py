@@ -13,6 +13,7 @@ from tkinter import simpledialog, messagebox
 import re
 import csv
 
+import config
 from browser import BrowsePanel
 import M3U8Sites
 
@@ -732,7 +733,7 @@ class MainWindow(tk.Tk):
     def _pick_dest(self):
         d = tkinter.filedialog.askdirectory()
         if d:
-            self._dest_var.set(d)
+            self._dest_var.set(config.set_download_directory(d))
 
     def _open_dest_folder(self):
         import subprocess, platform
@@ -902,6 +903,7 @@ class MainWindow(tk.Tk):
 
     def _on_close(self):
         self._is_closing = True
+        config.set_download_directory(self._dest_var.get())
         self.cancel_all()
         self._queue_tree.save_csv(self.CSV_PATH)
         self.destroy()

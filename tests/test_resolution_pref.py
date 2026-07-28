@@ -219,3 +219,21 @@ def test_download_concurrency_round_trip_clamps_and_preserves_preferences(
         json.dumps({'download_concurrency': 'not-a-number'}),
         encoding='utf-8')
     assert config.get_download_concurrency() == 2
+
+
+def test_download_directory_round_trip_preserves_preferences(
+        tmp_path, monkeypatch):
+    path = tmp_path / 'ui_prefs.json'
+    monkeypatch.setattr(config, '_ui_prefs_path', lambda: str(path))
+
+    config.set_theme('dark')
+    assert config.get_download_directory() == 'download'
+    assert config.set_download_directory(r'D:\Videos') == r'D:\Videos'
+    assert config.get_download_directory() == r'D:\Videos'
+
+    stored = json.loads(path.read_text(encoding='utf-8'))
+    assert stored['theme'] == 'dark'
+    assert stored['download_directory'] == r'D:\Videos'
+
+    assert config.set_download_directory('  ') == 'download'
+    assert config.get_download_directory() == 'download'

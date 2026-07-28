@@ -126,6 +126,7 @@ except Exception:
         pass
 
 from args import *
+import config
 
 # Use modern CustomTkinter GUI by default; fall back to basic tkinter if unavailable
 try:
@@ -139,7 +140,7 @@ except ImportError:
     "" or None : same as the url's last stem,  ie:  "abc-001" for url = "https://jable.tv/videos/abc-001/"
     others : relative to the current folder, or an absolute path  
     '''
-save_folder = "download"
+save_folder = config.get_download_directory()
 
 
 if __name__ == "__main__":

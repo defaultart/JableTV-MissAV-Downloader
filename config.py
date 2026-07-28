@@ -235,6 +235,27 @@ def set_download_concurrency(value):
     return normalized
 
 
+def get_download_directory():
+    """返回上次选择的下载目录，未设置时使用默认目录。"""
+    directory = _load_prefs().get('download_directory')
+    if isinstance(directory, str) and directory.strip():
+        return directory.strip()
+    return 'download'
+
+
+def set_download_directory(directory):
+    """保存 GUI 使用的下载目录，供下次启动恢复。"""
+    normalized = str(directory or '').strip() or 'download'
+    try:
+        with _prefs_lock:
+            prefs = _load_prefs()
+            prefs['download_directory'] = normalized
+            _save_prefs(prefs)
+    except Exception:
+        pass
+    return normalized
+
+
 def normalize_proxy_url(raw):
     """Validate one app-scoped proxy URL; bare host:port means HTTP."""
     value = str(raw or '').strip()
