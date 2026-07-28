@@ -27,7 +27,7 @@ import time
 import unicodedata
 import wave
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Iterable, Optional
@@ -3107,7 +3107,8 @@ def _generation_slot(cancel_check: Optional[CancelCheck]):
 
 def generate_subtitles(video_path: str, mode,
                        progress_callback: Optional[ProgressCallback] = None,
-                       cancel_check: Optional[CancelCheck] = None) -> SubtitleResult:
+                       cancel_check: Optional[CancelCheck] = None, *,
+                       serialize: bool = True) -> SubtitleResult:
     """Generate requested sidecar SRT files next to ``video_path``.
 
     Output names are ``.ja.srt``, ``.en.srt``, ``.zh-TW.srt``, and
@@ -3128,7 +3129,10 @@ def generate_subtitles(video_path: str, mode,
     media_identity = _media_identity(video_path)
     provenance_path = _subtitle_provenance_path(video_path)
     generated: list[str] = []
-    with _generation_slot(cancel_check):
+    # 下载队列与旧调用默认串行；本地字幕页由自身队列限制并发。
+    generation_context = (
+        _generation_slot(cancel_check) if serialize else nullcontext())
+    with generation_context:
         _check_cancel(cancel_check)
         manifest = _load_subtitle_provenance(provenance_path)
         entries = manifest['tracks']

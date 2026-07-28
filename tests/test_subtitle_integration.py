@@ -25,6 +25,136 @@ def _wait_until(predicate, timeout=2):
     return bool(predicate())
 
 
+def test_local_subtitle_manager_dedupes_and_snapshots_mode(tmp_path):
+    first = tmp_path / 'first.mp4'
+    second = tmp_path / 'second.mp4'
+    first.write_bytes(b'video')
+    second.write_bytes(b'video')
+    release = threading.Event()
+    calls = []
+
+    def fake_generate(path, mode, progress_callback=None,
+                      cancel_check=None, *, serialize=True):
+        calls.append((path, mode, serialize))
+        progress_callback('transcribe_ja', 25)
+        assert release.wait(2)
+        return SubtitleResult((path + '.ja.srt',), ())
+
+    manager = gui_modern.LocalSubtitleManager(
+        max_concurrent=1, generator=fake_generate)
+    assert manager.add_paths([str(first), str(first.resolve()), str(second)]) == 2
+    assert manager.enqueue_selected('zh-cn') == 2
+    assert _wait_until(
+        lambda: manager.active_count == 1 and manager.pending_count == 1)
+    assert all(item.mode == 'zh-cn' for item in manager.get_items())
+
+    release.set()
+    assert _wait_until(
+        lambda: manager.active_count == 0 and manager.pending_count == 0)
+    assert [mode for _, mode, _ in calls] == ['zh-cn', 'zh-cn']
+    assert all(serialize is False for _, _, serialize in calls)
+    assert all(item.state == 'completed' for item in manager.get_items())
+
+
+def test_local_subtitle_manager_changes_parallel_limit_without_interrupting(
+        tmp_path):
+    paths = []
+    for index in range(4):
+        path = tmp_path / f'{index}.mp4'
+        path.write_bytes(b'video')
+        paths.append(str(path))
+
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    maximum = 0
+
+    def fake_generate(path, mode, progress_callback=None,
+                      cancel_check=None, *, serialize=True):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            while not release.wait(0.01):
+                if cancel_check():
+                    raise gui_modern.SubtitleCancelled()
+        finally:
+            with lock:
+                active -= 1
+        return SubtitleResult((path + '.ja.srt',), ())
+
+    manager = gui_modern.LocalSubtitleManager(
+        max_concurrent=1, generator=fake_generate)
+    manager.add_paths(paths)
+    manager.enqueue_selected('ja')
+    assert _wait_until(
+        lambda: manager.active_count == 1 and manager.pending_count == 3)
+
+    manager.max_concurrent = 3
+    assert _wait_until(
+        lambda: manager.active_count == 3 and manager.pending_count == 1)
+    assert _wait_until(lambda: active == 3)
+    manager.max_concurrent = 1
+    assert manager.active_count == 3
+
+    release.set()
+    assert _wait_until(
+        lambda: manager.active_count == 0 and manager.pending_count == 0)
+    assert maximum == 3
+    assert all(item.state == 'completed' for item in manager.get_items())
+
+
+def test_local_subtitle_manager_cancel_retry_remove_and_missing_file(tmp_path):
+    video = tmp_path / 'video.mp4'
+    video.write_bytes(b'video')
+    started = threading.Event()
+    attempts = []
+
+    def fake_generate(path, mode, progress_callback=None,
+                      cancel_check=None, *, serialize=True):
+        attempts.append(path)
+        started.set()
+        while not cancel_check():
+            time.sleep(0.01)
+        raise gui_modern.SubtitleCancelled()
+
+    manager = gui_modern.LocalSubtitleManager(generator=fake_generate)
+    manager.add_paths([str(video)])
+    manager.enqueue_selected('ja')
+    assert started.wait(1)
+    assert manager.cancel(str(video))
+    assert _wait_until(lambda: manager.active_count == 0)
+    assert manager.get_items()[0].state == 'cancelled'
+
+    assert manager.retry(str(video))
+    assert _wait_until(lambda: manager.active_count == 1)
+    assert manager.remove(str(video))
+    assert _wait_until(lambda: manager.active_count == 0)
+    assert manager.get_items() == []
+    assert len(attempts) == 2
+
+    missing = tmp_path / 'missing.mp4'
+    manager.add_paths([str(missing)])
+    manager.enqueue_selected('ja')
+    assert _wait_until(lambda: manager.active_count == 0)
+    item = manager.get_items()[0]
+    assert item.state == 'failed'
+    assert locales.T('local_subtitle_file_missing') in item.error
+
+
+def test_local_subtitle_manager_rejects_none_mode(tmp_path):
+    video = tmp_path / 'video.mp4'
+    video.write_bytes(b'video')
+    manager = gui_modern.LocalSubtitleManager(
+        generator=lambda *_args, **_kwargs: pytest.fail(
+            'none mode must not start generation'))
+    manager.add_paths([str(video)])
+
+    assert manager.enqueue_selected('none') == 0
+    assert manager.get_items()[0].state == 'selected'
+
+
 def test_smalltool_defers_subtitle_engine_until_download():
     source = Path(jable_smalltool.__file__).read_text(encoding='utf-8')
     tree = ast.parse(source)

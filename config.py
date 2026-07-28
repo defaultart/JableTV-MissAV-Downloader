@@ -29,6 +29,9 @@ VALID_RECOGNITION_QUALITIES = {'quality', 'balanced', 'fast'}
 DEFAULT_DOWNLOAD_CONCURRENCY = 2
 MIN_DOWNLOAD_CONCURRENCY = 1
 MAX_DOWNLOAD_CONCURRENCY = 32
+DEFAULT_LOCAL_SUBTITLE_CONCURRENCY = 1
+MIN_LOCAL_SUBTITLE_CONCURRENCY = 1
+MAX_LOCAL_SUBTITLE_CONCURRENCY = 10
 VALID_PROXY_SCHEMES = {
     'http', 'https', 'socks4', 'socks4a', 'socks5', 'socks5h',
 }
@@ -229,6 +232,36 @@ def set_download_concurrency(value):
         with _prefs_lock:
             prefs = _load_prefs()
             prefs['download_concurrency'] = normalized
+            _save_prefs(prefs)
+    except Exception:
+        pass
+    return normalized
+
+
+def _normalize_local_subtitle_concurrency(value):
+    """将本地字幕并行数限制在界面允许的 1 到 10。"""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = DEFAULT_LOCAL_SUBTITLE_CONCURRENCY
+    return max(
+        MIN_LOCAL_SUBTITLE_CONCURRENCY,
+        min(parsed, MAX_LOCAL_SUBTITLE_CONCURRENCY))
+
+
+def get_local_subtitle_concurrency():
+    """返回本地字幕页上次保存的并行任务数。"""
+    return _normalize_local_subtitle_concurrency(
+        _load_prefs().get('local_subtitle_concurrency'))
+
+
+def set_local_subtitle_concurrency(value):
+    """保存本地字幕页的并行任务数。"""
+    normalized = _normalize_local_subtitle_concurrency(value)
+    try:
+        with _prefs_lock:
+            prefs = _load_prefs()
+            prefs['local_subtitle_concurrency'] = normalized
             _save_prefs(prefs)
     except Exception:
         pass

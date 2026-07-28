@@ -275,6 +275,23 @@ def test_simplified_subtitle_option_is_available_in_both_guis():
     assert jable_smalltool.normalize_subtitle_mode('zh-cn') == 'zh-cn'
 
 
+def test_modern_has_local_subtitle_tab_and_all_locales():
+    source = inspect.getsource(gui_modern.ModernApp._build_ui)
+    assert "['browse', 'download', 'subtitle', 'settings']" in source
+    assert 'self._build_subtitle_tab()' in source
+
+    required = {
+        'tab_subtitle',
+        'local_subtitle_title',
+        'local_subtitle_generate',
+        'local_subtitle_concurrency',
+        'local_subtitle_state_processing',
+        'local_subtitle_mode_required',
+    }
+    for language in ('zh', 'en', 'zh-Hans', 'ja'):
+        assert required <= locales.STRINGS[language].keys()
+
+
 def test_global_version_selector_saves_internal_preference(monkeypatch):
     app = jable_smalltool.SmallToolApp.__new__(jable_smalltool.SmallToolApp)
     app._cfg = {}

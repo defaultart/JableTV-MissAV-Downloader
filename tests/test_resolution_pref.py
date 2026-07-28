@@ -223,6 +223,28 @@ def test_download_concurrency_round_trip_clamps_and_preserves_preferences(
     assert config.get_download_concurrency() == 2
 
 
+def test_local_subtitle_concurrency_round_trip_clamps_and_preserves_preferences(
+        tmp_path, monkeypatch):
+    path = tmp_path / 'ui_prefs.json'
+    monkeypatch.setattr(config, '_ui_prefs_path', lambda: str(path))
+
+    config.set_theme('dark')
+    assert config.get_local_subtitle_concurrency() == 1
+    assert config.set_local_subtitle_concurrency('7') == 7
+    assert config.get_local_subtitle_concurrency() == 7
+    assert config.set_local_subtitle_concurrency(0) == 1
+    assert config.set_local_subtitle_concurrency(99) == 10
+
+    stored = json.loads(path.read_text(encoding='utf-8'))
+    assert stored['theme'] == 'dark'
+    assert stored['local_subtitle_concurrency'] == 10
+
+    path.write_text(
+        json.dumps({'local_subtitle_concurrency': 'invalid'}),
+        encoding='utf-8')
+    assert config.get_local_subtitle_concurrency() == 1
+
+
 def test_download_directory_round_trip_preserves_preferences(
         tmp_path, monkeypatch):
     path = tmp_path / 'ui_prefs.json'

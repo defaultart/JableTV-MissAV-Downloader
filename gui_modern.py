@@ -638,6 +638,260 @@ class DownloadManager:
             return len(self._subtitle_pending)
 
 
+class LocalSubtitleItem:
+    """本地视频字幕任务在当前会话中的可见状态。"""
+
+    __slots__ = (
+        'path', 'name', 'state', 'stage', 'progress', 'error', 'mode',
+        'cancelled',
+    )
+
+    def __init__(self, path: str):
+        self.path = path
+        self.name = os.path.basename(path) or path
+        self.state = 'selected'
+        self.stage = ''
+        self.progress = 0
+        self.error = ''
+        self.mode = 'none'
+        self.cancelled = threading.Event()
+
+
+class LocalSubtitleManager:
+    """管理本地视频字幕任务，并在页面设定的并行上限内调度。"""
+
+    def __init__(self, on_update=None, max_concurrent: int = 1,
+                 generator=None):
+        self._on_update = on_update
+        self._generator = generator or generate_subtitles
+        self._items: dict[str, LocalSubtitleItem] = {}
+        self._pending: list[LocalSubtitleItem] = []
+        self._active: dict[str, LocalSubtitleItem] = {}
+        self._lock = threading.RLock()
+        self._max_concurrent = max(1, min(int(max_concurrent), 10))
+
+    @staticmethod
+    def canonical_path(path: str) -> str:
+        """使用规范化绝对路径识别同一个本地视频。"""
+        return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+    @property
+    def max_concurrent(self) -> int:
+        with self._lock:
+            return self._max_concurrent
+
+    @max_concurrent.setter
+    def max_concurrent(self, value: int):
+        with self._lock:
+            self._max_concurrent = max(1, min(int(value), 10))
+        self._try_next()
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return len(self._active)
+
+    @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    def get_items(self) -> list[LocalSubtitleItem]:
+        with self._lock:
+            return list(self._items.values())
+
+    def add_paths(self, paths) -> int:
+        """添加文件但不立即生成，重复绝对路径会被忽略。"""
+        added = 0
+        with self._lock:
+            for path in paths:
+                normalized = self.canonical_path(str(path or '').strip())
+                if not path or normalized in self._items:
+                    continue
+                self._items[normalized] = LocalSubtitleItem(normalized)
+                added += 1
+        self._notify()
+        return added
+
+    def enqueue_selected(self, mode: str) -> int:
+        """按点击生成时的字幕模式固化并加入所有待选择任务。"""
+        normalized_mode = normalize_subtitle_mode(mode)
+        if normalized_mode == 'none':
+            return 0
+        queued = 0
+        with self._lock:
+            for item in self._items.values():
+                if item.state != 'selected':
+                    continue
+                self._prepare_locked(item, normalized_mode)
+                queued += 1
+        self._notify()
+        self._try_next()
+        return queued
+
+    def retry(self, path: str) -> bool:
+        key = self.canonical_path(path)
+        with self._lock:
+            item = self._items.get(key)
+            if item is None or item.state in {'waiting', 'processing'}:
+                return False
+            mode = normalize_subtitle_mode(item.mode)
+            if mode == 'none':
+                return False
+            self._prepare_locked(item, mode)
+        self._notify()
+        self._try_next()
+        return True
+
+    def cancel(self, path: str) -> bool:
+        key = self.canonical_path(path)
+        with self._lock:
+            item = self._items.get(key)
+            if item is None:
+                return False
+            item.cancelled.set()
+            self._pending = [
+                candidate for candidate in self._pending
+                if candidate is not item
+            ]
+            if item.state in {'waiting', 'processing'}:
+                item.state = 'cancelled'
+                item.stage = ''
+                item.error = ''
+        self._notify()
+        self._try_next()
+        return True
+
+    def cancel_all(self):
+        with self._lock:
+            for item in self._items.values():
+                if item.state not in {'waiting', 'processing'}:
+                    continue
+                item.cancelled.set()
+                item.state = 'cancelled'
+                item.stage = ''
+                item.error = ''
+            self._pending.clear()
+        self._notify()
+
+    def remove(self, path: str) -> bool:
+        key = self.canonical_path(path)
+        with self._lock:
+            item = self._items.pop(key, None)
+            if item is None:
+                return False
+            item.cancelled.set()
+            self._pending = [
+                candidate for candidate in self._pending
+                if candidate is not item
+            ]
+        self._notify()
+        self._try_next()
+        return True
+
+    def clear_all(self):
+        self.cancel_all()
+        with self._lock:
+            self._items.clear()
+        self._notify()
+
+    def _prepare_locked(self, item: LocalSubtitleItem, mode: str):
+        item.mode = mode
+        item.state = 'waiting'
+        item.stage = 'queued'
+        item.progress = 0
+        item.error = ''
+        item.cancelled = threading.Event()
+        self._pending.append(item)
+
+    def _try_next(self):
+        tasks = []
+        with self._lock:
+            while (
+                    self._pending
+                    and len(self._active) < self._max_concurrent):
+                item = self._pending.pop(0)
+                key = self.canonical_path(item.path)
+                if (
+                        item.cancelled.is_set()
+                        or self._items.get(key) is not item):
+                    continue
+                item.state = 'processing'
+                self._active[key] = item
+                tasks.append(item)
+        for item in tasks:
+            threading.Thread(
+                target=self._run, args=(item,), daemon=True).start()
+        if tasks:
+            self._notify()
+
+    def _run(self, item: LocalSubtitleItem):
+        key = self.canonical_path(item.path)
+
+        def _cancelled():
+            with self._lock:
+                return (
+                    item.cancelled.is_set()
+                    or self._active.get(key) is not item
+                    or self._items.get(key) is not item
+                )
+
+        def _progress(stage, percent):
+            with self._lock:
+                if _cancelled():
+                    return
+                item.stage = str(stage or '')
+                if percent is not None:
+                    item.progress = max(0, min(int(percent), 100))
+            self._notify()
+
+        state = 'completed'
+        error = ''
+        try:
+            if not os.path.isfile(item.path):
+                raise FileNotFoundError(T('local_subtitle_file_missing'))
+            result = self._generator(
+                item.path, item.mode,
+                progress_callback=_progress,
+                cancel_check=_cancelled,
+                serialize=False,
+            )
+            if result.no_speech:
+                state = 'no_speech'
+            elif not result.files:
+                state = 'failed'
+                error = T('subtitle_empty_result')
+        except SubtitleCancelled:
+            state = 'cancelled'
+        except Exception as exc:
+            state = 'cancelled' if _cancelled() else 'failed'
+            if state == 'failed':
+                error = translation_failure_message(exc)
+                print(
+                    f'[本地字幕失败] {item.path}\n  {error}',
+                    flush=True)
+
+        with self._lock:
+            self._active.pop(key, None)
+            if self._items.get(key) is item:
+                if item.cancelled.is_set():
+                    state = 'cancelled'
+                item.state = state
+                item.stage = ''
+                item.progress = 100 if state in {'completed', 'no_speech'} else 0
+                item.error = error if state == 'failed' else ''
+        self._notify()
+        self._try_next()
+
+    def _notify(self):
+        if self._on_update is None:
+            return
+        try:
+            self._on_update()
+        except Exception as exc:
+            print(f'[错误] 本地字幕状态通知失败: {exc}', flush=True)
+
+
 # ── Browse helper ────────────────────────────────────────────────────
 def fetch_page_data(browser_cls, url: str) -> dict:
     """Fetch video list from a category/search URL. Returns dict with videos list."""
@@ -751,6 +1005,9 @@ class ModernApp(ctk.CTk):
         self._dl_footer_lbl = None
         self._dl_drain_id = None
         self._dl_gen = 0
+        self._local_subtitle_rows = {}
+        self._local_subtitle_empty_lbl = None
+        self._local_subtitle_refresh_id = None
         self._thumb_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         self._speed_mbps = 0.0
         self._download_autosave_ticks = 0
@@ -770,6 +1027,8 @@ class ModernApp(ctk.CTk):
         # Download manager
         self._dlmgr = DownloadManager(
             max_concurrent=config.get_download_concurrency())
+        self._local_subtitle_mgr = LocalSubtitleManager(
+            max_concurrent=config.get_local_subtitle_concurrency())
         if not os.path.exists(CSV_PATH):
             old_csv = os.path.join(os.getcwd(), 'JableTV.csv')
             if (os.path.exists(old_csv) and
@@ -789,6 +1048,7 @@ class ModernApp(ctk.CTk):
         self.protocol('WM_DELETE_WINDOW', self._on_close)
         # Start periodic refresh for downloads
         self._refresh_downloads()
+        self._refresh_local_subtitles()
         # Start clipboard monitor (main-thread safe)
         self._clp_text = ''
         self._clipboard_poll()
@@ -1350,6 +1610,8 @@ class ModernApp(ctk.CTk):
             self._categories = []
             self._selected_urls.clear()
             self._dl_empty_lbl = None
+            self._local_subtitle_rows = {}
+            self._local_subtitle_empty_lbl = None
             self._videos = []
             self._browse_blocked = False
             self._browse_empty_message = ''
@@ -1358,6 +1620,7 @@ class ModernApp(ctk.CTk):
             self._cat_menu = None
             self._grid_scroll = None
             self._dl_scroll = None
+            self._local_subtitle_scroll = None
             self._sidebar = None
             self._status_lbl = None
 
@@ -1447,8 +1710,13 @@ class ModernApp(ctk.CTk):
         ctk.CTkFrame(self, height=1, fg_color=BORDER, corner_radius=0).pack(fill='x')
 
         # ── Custom underline tab bar (Studio Noir) ──────────────────
-        self._tab_keys = ['browse', 'download', 'settings']
-        tab_labels = {'browse': T('tab_browse'), 'download': T('tab_download'), 'settings': T('tab_settings')}
+        self._tab_keys = ['browse', 'download', 'subtitle', 'settings']
+        tab_labels = {
+            'browse': T('tab_browse'),
+            'download': T('tab_download'),
+            'subtitle': T('tab_subtitle'),
+            'settings': T('tab_settings'),
+        }
 
         tabbar = ctk.CTkFrame(self, height=48, fg_color=BG_HEADER, corner_radius=0)
         tabbar.pack(fill='x')
@@ -1482,6 +1750,7 @@ class ModernApp(ctk.CTk):
 
         self._build_browse_tab()
         self._build_download_tab()
+        self._build_subtitle_tab()
         self._build_settings_tab()
 
         self._select_tab(self._tab_keys[self._active_tab_idx])
@@ -1738,6 +2007,97 @@ class ModernApp(ctk.CTk):
             scrollbar_button_color=BORDER,
             scrollbar_button_hover_color=BORDER_HOVER)
         self._dl_scroll.pack(fill='both', expand=True)
+
+    # ── 字幕标签页 ───────────────────────────────────────────────────
+    def _build_subtitle_tab(self):
+        tab = self._tab_frames['subtitle']
+
+        intro = ctk.CTkFrame(tab, fg_color=BG_SECTION, corner_radius=0)
+        intro.pack(fill='x')
+        intro_text = ctk.CTkFrame(intro, fg_color='transparent')
+        intro_text.pack(side='left', fill='x', expand=True, padx=20, pady=14)
+        ctk.CTkLabel(
+            intro_text, text=T('local_subtitle_title'),
+            text_color=TEXT_PRI, font=(ui_font(), 17, 'bold'),
+            anchor='w').pack(fill='x')
+        ctk.CTkLabel(
+            intro_text, text=T('local_subtitle_desc'),
+            text_color=TEXT_DIM, font=(ui_font(), 10),
+            anchor='w').pack(fill='x', pady=(3, 0))
+        ctk.CTkButton(
+            intro, text=T('local_subtitle_choose'), width=126, height=38,
+            corner_radius=CONTROL_RADIUS, fg_color='transparent',
+            border_width=1, border_color=BORDER_HOVER,
+            hover_color=BG_CARD_HOVER, text_color=TEXT_PRI,
+            command=self._choose_local_subtitle_files).pack(
+                side='right', padx=20, pady=14)
+
+        ctk.CTkFrame(
+            tab, height=1, fg_color=BORDER, corner_radius=0).pack(fill='x')
+
+        bar = ctk.CTkFrame(
+            tab, fg_color=BG_HEADER, corner_radius=0, height=62)
+        bar.pack(fill='x')
+        bar.pack_propagate(False)
+        bar.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(bar, fg_color='transparent')
+        left.grid(row=0, column=0, padx=(16, 8), pady=12, sticky='w')
+        ctk.CTkButton(
+            left, text=T('local_subtitle_generate'), width=126, height=38,
+            corner_radius=CONTROL_RADIUS, fg_color=ACCENT,
+            hover_color=ACCENT_HOVER, text_color=WHITE,
+            font=(ui_font(), 11, 'bold'),
+            command=self._generate_local_subtitles).pack(side='left')
+
+        concurrency = ctk.CTkFrame(bar, fg_color='transparent')
+        concurrency.grid(row=0, column=1, pady=12)
+        ctk.CTkLabel(
+            concurrency, text=T('local_subtitle_concurrency'),
+            text_color=TEXT_DIM, font=(ui_font(), 10)).pack(
+                side='left', padx=(0, 8))
+        self._local_subtitle_conc_var = ctk.StringVar(
+            value=str(self._local_subtitle_mgr.max_concurrent))
+        ctk.CTkOptionMenu(
+            concurrency, values=[str(value) for value in range(1, 11)],
+            variable=self._local_subtitle_conc_var,
+            command=self._on_local_subtitle_concurrency_change,
+            width=76, height=38, corner_radius=CONTROL_RADIUS,
+            fg_color=BG_INPUT, button_color=BORDER_HOVER,
+            button_hover_color=ACCENT, text_color=TEXT_PRI,
+            dropdown_fg_color=BG_CARD,
+            dropdown_hover_color=BG_CARD_HOVER,
+            dropdown_text_color=TEXT_PRI,
+            font=(ui_font(), 10), dropdown_font=(ui_font(), 10)).pack(
+                side='left')
+        ctk.CTkLabel(
+            concurrency, text=T('local_subtitle_resource_warning'),
+            text_color=WARNING, font=(ui_font(), 9)).pack(
+                side='left', padx=(10, 0))
+
+        right = ctk.CTkFrame(bar, fg_color='transparent')
+        right.grid(row=0, column=2, padx=(8, 16), pady=12, sticky='e')
+        ctk.CTkButton(
+            right, text=T('cancel_all'), width=88, height=38,
+            corner_radius=CONTROL_RADIUS, fg_color='transparent',
+            border_width=1, border_color=BORDER_HOVER,
+            hover_color=BG_CARD_HOVER, text_color=ERROR_C,
+            command=self._local_subtitle_mgr.cancel_all).pack(side='left')
+        ctk.CTkButton(
+            right, text=T('clear_list'), width=70, height=38,
+            corner_radius=CONTROL_RADIUS, fg_color='transparent',
+            border_width=1, border_color=BORDER_HOVER,
+            hover_color=BG_CARD_HOVER, text_color=TEXT_SEC,
+            command=self._local_subtitle_mgr.clear_all).pack(
+                side='left', padx=(8, 0))
+
+        ctk.CTkFrame(
+            tab, height=1, fg_color=BORDER, corner_radius=0).pack(fill='x')
+        self._local_subtitle_scroll = ctk.CTkScrollableFrame(
+            tab, fg_color=BG_DARK, corner_radius=0,
+            scrollbar_button_color=BORDER,
+            scrollbar_button_hover_color=BORDER_HOVER)
+        self._local_subtitle_scroll.pack(fill='both', expand=True)
 
     def _build_update_card(self, content):
         upd = ctk.CTkFrame(content, fg_color=BG_CARD, corner_radius=CARD_RADIUS,
@@ -2946,6 +3306,40 @@ class ModernApp(ctk.CTk):
         self._dlmgr.max_concurrent = value
         self._conc_var.set(str(value))
 
+    def _on_local_subtitle_concurrency_change(self, value):
+        normalized = config.set_local_subtitle_concurrency(value)
+        self._local_subtitle_mgr.max_concurrent = normalized
+        self._local_subtitle_conc_var.set(str(normalized))
+
+    def _choose_local_subtitle_files(self):
+        paths = filedialog.askopenfilenames(
+            title=T('local_subtitle_choose_title'),
+            filetypes=[
+                (
+                    T('local_subtitle_video_files'),
+                    '*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.m4v '
+                    '*.ts *.m2ts *.mts',
+                ),
+                (T('local_subtitle_all_files'), '*.*'),
+            ],
+        )
+        if paths:
+            self._local_subtitle_mgr.add_paths(paths)
+            self._refresh_local_subtitles(schedule=False)
+
+    def _generate_local_subtitles(self):
+        mode = normalize_subtitle_mode(config.get_subtitle_pref())
+        if mode == 'none':
+            messagebox.showwarning(
+                T('local_subtitle_mode_required_title'),
+                T('local_subtitle_mode_required'))
+            return
+        queued = self._local_subtitle_mgr.enqueue_selected(mode)
+        if not queued:
+            messagebox.showinfo(
+                T('local_subtitle_nothing_title'),
+                T('local_subtitle_nothing'))
+
     def _pick_dest(self):
         d = filedialog.askdirectory()
         if d:
@@ -2968,6 +3362,20 @@ class ModernApp(ctk.CTk):
                 subprocess.Popen(['xdg-open', folder])
         except OSError as e:
             messagebox.showerror(T('open_folder_failed_title'), str(e))
+
+    def _open_local_subtitle_folder(self, path: str):
+        import subprocess, platform
+        folder = os.path.dirname(path)
+        system = platform.system()
+        try:
+            if system == 'Windows':
+                os.startfile(folder)
+            elif system == 'Darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+        except OSError as exc:
+            messagebox.showerror(T('open_folder_failed_title'), str(exc))
 
     def _open_queue_folder(self):
         import subprocess, platform
@@ -3000,6 +3408,203 @@ class ModernApp(ctk.CTk):
             messagebox.showerror(T('clear_saved_queue_failed'), str(e))
         finally:
             self._refresh_downloads(schedule=False)
+
+    # ── 本地字幕列表刷新 ────────────────────────────────────────────
+    def _refresh_local_subtitles(self, schedule: bool = True):
+        if self._is_closing:
+            return
+        scroll = getattr(self, '_local_subtitle_scroll', None)
+        if not self._rebuilding and scroll is not None:
+            try:
+                items = self._local_subtitle_mgr.get_items()
+                keys = {
+                    self._local_subtitle_mgr.canonical_path(item.path)
+                    for item in items
+                }
+                for key in list(self._local_subtitle_rows):
+                    if key not in keys:
+                        widgets = self._local_subtitle_rows.pop(key)
+                        widgets['row'].destroy()
+
+                if not items:
+                    if self._local_subtitle_empty_lbl is None:
+                        self._local_subtitle_empty_lbl = ctk.CTkLabel(
+                            scroll, text=T('local_subtitle_empty'),
+                            text_color=TEXT_DIM, font=(ui_font(), 13))
+                        self._local_subtitle_empty_lbl.pack(pady=40)
+                else:
+                    if self._local_subtitle_empty_lbl is not None:
+                        self._local_subtitle_empty_lbl.destroy()
+                        self._local_subtitle_empty_lbl = None
+                    for item in items:
+                        key = self._local_subtitle_mgr.canonical_path(
+                            item.path)
+                        widgets = self._local_subtitle_rows.get(key)
+                        if widgets is None:
+                            widgets = self._build_local_subtitle_row(item)
+                            self._local_subtitle_rows[key] = widgets
+                        self._update_local_subtitle_row(widgets, item)
+            except tk.TclError:
+                pass
+        if schedule and not self._is_closing:
+            try:
+                self._local_subtitle_refresh_id = self.after(
+                    500, self._refresh_local_subtitles)
+            except tk.TclError:
+                self._local_subtitle_refresh_id = None
+
+    def _build_local_subtitle_row(self, item: LocalSubtitleItem) -> dict:
+        row = ctk.CTkFrame(
+            self._local_subtitle_scroll, fg_color=BG_CARD,
+            corner_radius=CARD_RADIUS, border_width=1,
+            border_color=BORDER_CARD, height=88)
+        row.pack(fill='x', padx=16, pady=7)
+        row.pack_propagate(False)
+
+        state_holder = ctk.CTkFrame(
+            row, width=96, height=32, corner_radius=6,
+            fg_color=BG_BADGE)
+        state_holder.pack(side='left', padx=(14, 10))
+        state_holder.pack_propagate(False)
+        state_lbl = ctk.CTkLabel(
+            state_holder, text='', text_color=TEXT_SEC,
+            font=(ui_font(), 10, 'bold'))
+        state_lbl.pack(fill='both', expand=True, padx=6)
+
+        remove_btn = ctk.CTkButton(
+            row, text='✕', width=32, height=32,
+            corner_radius=CONTROL_RADIUS, fg_color='transparent',
+            border_width=1, border_color=BORDER_HOVER,
+            hover_color=BG_CARD_HOVER, text_color=TEXT_DIM,
+            font=('Consolas', 12),
+            command=lambda p=item.path:
+                self._local_subtitle_mgr.remove(p))
+        remove_btn.pack(side='right', padx=(6, 14))
+        open_btn = ctk.CTkButton(
+            row, text=T('open_btn'), width=54, height=32,
+            corner_radius=CONTROL_RADIUS, fg_color='transparent',
+            border_width=1, border_color=BORDER_HOVER,
+            hover_color=BG_CARD_HOVER, text_color=TEXT_SEC,
+            command=lambda p=item.path:
+                self._open_local_subtitle_folder(p))
+        open_btn.pack(side='right', padx=(6, 0))
+        action_btn = ctk.CTkButton(
+            row, text='', width=58, height=32,
+            corner_radius=CONTROL_RADIUS, fg_color='transparent',
+            border_width=1, border_color=BORDER_HOVER,
+            hover_color=BG_CARD_HOVER)
+        action_btn.pack(side='right', padx=(6, 0))
+
+        metrics = ctk.CTkFrame(row, fg_color='transparent')
+        metrics.pack(side='right', padx=(8, 4))
+        progress = ctk.CTkProgressBar(
+            metrics, width=130, height=8, corner_radius=5,
+            fg_color=BG_INPUT, progress_color=ACCENT)
+        progress.pack(side='left', padx=(0, 4))
+        percent = ctk.CTkLabel(
+            metrics, text='0%', text_color=TEXT_SEC,
+            font=('Consolas', 10, 'bold'), width=42)
+        percent.pack(side='left')
+
+        text_stack = ctk.CTkFrame(row, fg_color='transparent')
+        text_stack.pack(
+            side='left', fill='both', expand=True,
+            padx=(0, 10), pady=10)
+        name_lbl = ctk.CTkLabel(
+            text_stack, text=item.name, text_color=TEXT_PRI,
+            font=(ui_font(), 11, 'bold'), anchor='w')
+        name_lbl.pack(fill='x', anchor='w')
+        detail_lbl = ctk.CTkLabel(
+            text_stack, text='', text_color=TEXT_DIM,
+            font=(ui_font(), 9), anchor='w')
+        detail_lbl.pack(fill='x', anchor='w', pady=(3, 0))
+
+        return {
+            'row': row, 'state_holder': state_holder,
+            'state_lbl': state_lbl, 'name_lbl': name_lbl,
+            'detail_lbl': detail_lbl, 'metrics': metrics,
+            'progress': progress, 'percent': percent,
+            'action_btn': action_btn, 'open_btn': open_btn,
+            'action_visible': True,
+        }
+
+    def _update_local_subtitle_row(
+            self, widgets: dict, item: LocalSubtitleItem):
+        state_key = f'local_subtitle_state_{item.state}'
+        colors = {
+            'selected': TEXT_SEC,
+            'waiting': WARNING,
+            'processing': ACCENT,
+            'completed': SUCCESS,
+            'no_speech': TEXT_SEC,
+            'failed': ERROR_C,
+            'cancelled': TEXT_DIM,
+        }
+        backgrounds = {
+            'waiting': WARNING_DIM,
+            'processing': ACCENT_DIM,
+            'completed': SUCCESS_DIM,
+            'failed': ERROR_DIM,
+        }
+        widgets['state_holder'].configure(
+            fg_color=backgrounds.get(item.state, BG_BADGE))
+        widgets['state_lbl'].configure(
+            text=T(state_key),
+            text_color=colors.get(item.state, TEXT_SEC))
+        widgets['name_lbl'].configure(text=item.name)
+
+        detail = os.path.dirname(item.path)
+        detail_color = TEXT_DIM
+        if item.error:
+            detail = item.error.replace('\n', ' ').strip()
+            if len(detail) > 120:
+                detail = detail[:117] + '...'
+            detail_color = ERROR_C
+        elif item.stage:
+            detail = (
+                f"{T('local_subtitle_stage_label')}: "
+                f"{T('local_subtitle_stage_' + item.stage)} · "
+                f"{os.path.dirname(item.path)}"
+            )
+        widgets['detail_lbl'].configure(
+            text=detail, text_color=detail_color)
+
+        processing = item.state == 'processing'
+        if processing:
+            if not widgets['metrics'].winfo_manager():
+                widgets['metrics'].pack(
+                    side='right', padx=(8, 4),
+                    before=widgets['action_btn'])
+            widgets['progress'].set(
+                max(0.0, min(1.0, item.progress / 100)))
+            widgets['percent'].configure(text=f'{item.progress}%')
+        elif widgets['metrics'].winfo_manager():
+            widgets['metrics'].pack_forget()
+
+        actionable = item.state in {
+            'waiting', 'processing', 'failed', 'cancelled',
+        }
+        if actionable:
+            if item.state in {'waiting', 'processing'}:
+                widgets['action_btn'].configure(
+                    text=T('local_subtitle_cancel'),
+                    text_color=ERROR_C,
+                    command=lambda p=item.path:
+                        self._local_subtitle_mgr.cancel(p))
+            else:
+                widgets['action_btn'].configure(
+                    text=T('local_subtitle_retry'),
+                    text_color=ACCENT,
+                    command=lambda p=item.path:
+                        self._local_subtitle_mgr.retry(p))
+            if not widgets['action_visible']:
+                widgets['action_btn'].pack(
+                    side='right', padx=(6, 0),
+                    after=widgets['open_btn'])
+                widgets['action_visible'] = True
+        elif widgets['action_visible']:
+            widgets['action_btn'].pack_forget()
+            widgets['action_visible'] = False
 
     # ── Download list refresh (incremental — no destroy/rebuild storm) ──
     _STATE_COLORS = {
@@ -3410,6 +4015,13 @@ class ModernApp(ctk.CTk):
     def _on_close(self):
         self._is_closing = True
         config.set_download_directory(self._dest_var.get())
+        self._local_subtitle_mgr.cancel_all()
+        if self._local_subtitle_refresh_id:
+            try:
+                self.after_cancel(self._local_subtitle_refresh_id)
+            except Exception:
+                pass
+            self._local_subtitle_refresh_id = None
         if self._dl_drain_id:
             try:
                 self.after_cancel(self._dl_drain_id)
